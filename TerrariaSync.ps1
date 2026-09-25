@@ -3,52 +3,22 @@ Add-Type -AssemblyName System.Drawing
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# ==============================================================================
-# Global State & ADB Configuration
-# ==============================================================================
-$script:RootFolder = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { (Get-Location).Path }
-if (-not $script:RootFolder) { $script:RootFolder = 'g:\NewPrograms\TerrariaSync' }
-$script:ProjectRoot = Split-Path -Parent $script:RootFolder
+$script:ProjectRoot = Split-Path -Parent $PSScriptRoot
+$script:AdbPath = Join-Path $script:ProjectRoot '.android-sdk\platform-tools\adb.exe'
 $script:DeviceItems = @()
-$script:AdbPath = $null
-
-function Resolve-AdbPath {
-    $candidates = @(
-        (Join-Path $script:RootFolder '.android-sdk\platform-tools\adb.exe'),
-        (Join-Path (Split-Path -Parent $script:RootFolder) '.android-sdk\platform-tools\adb.exe'),
-        'G:\NewPrograms\.android-sdk\platform-tools\adb.exe',
-        (Join-Path $env:LOCALAPPDATA 'Android\Sdk\platform-tools\adb.exe'),
-        (Join-Path $env:ProgramFiles 'Android\platform-tools\adb.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Android\platform-tools\adb.exe')
-    )
-    foreach ($cand in $candidates) {
-        if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) {
-            return $cand
-        }
-    }
-    $cmd = Get-Command adb.exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-    return $null
-}
-
-$script:AdbPath = Resolve-AdbPath
 
 function Invoke-Adb {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    if (-not $script:AdbPath -or -not (Test-Path -LiteralPath $script:AdbPath)) {
-        $resolved = Resolve-AdbPath
-        if ($resolved) {
-            $script:AdbPath = $resolved
-        }
-        else {
-            throw "Не найден adb.exe. Убедитесь, что Android SDK platform-tools установлен или находится в PATH."
-        }
+    if (-not (Test-Path -LiteralPath $script:AdbPath)) {
+        throw "Не найден adb.exe: $script:AdbPath"
     }
 
     $oldPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
+        # Android returns UTF-8 file names. Windows PowerShell can otherwise decode
+        # native output using the console OEM code page and corrupt Cyrillic paths.
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
         $lines = @(& $script:AdbPath @Arguments 2>&1)
         $exitCode = $LASTEXITCODE
@@ -65,7 +35,7 @@ function Invoke-Adb {
 
 function Get-SelectedDevice {
     if ($script:DevicePicker.SelectedIndex -lt 0 -or $script:DevicePicker.SelectedIndex -ge $script:DeviceItems.Count) {
-        throw 'Сначала подключите телефон и выберите его в списке устройств.'
+        throw 'Сначала подключите телефон и выберите его в списке.'
     }
     $script:DeviceItems[$script:DevicePicker.SelectedIndex]
 }
@@ -73,25 +43,6 @@ function Get-SelectedDevice {
 function Set-Status {
     param([string]$Message)
     $script:StatusLabel.Text = $Message
-    $script:MainForm.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
-}
-
-function Set-Progress {
-    param(
-        [int]$Current,
-        [int]$Total,
-        [string]$Message
-    )
-    if ($Total -gt 0) {
-        $pct = [Math]::Min(100, [int](($Current / $Total) * 100))
-        $script:ProgressBar.Value = $pct
-        $script:StatusLabel.Text = "[$Current/$Total — $pct%] $Message"
-    }
-    else {
-        $script:ProgressBar.Value = 0
-        $script:StatusLabel.Text = $Message
-    }
     $script:MainForm.Refresh()
     [System.Windows.Forms.Application]::DoEvents()
 }
@@ -104,57 +55,6 @@ function Add-Log {
     $script:LogBox.ScrollToCaret()
 }
 
-# ==============================================================================
-# PC and Android Save File Discovery
-# ==============================================================================
-function Find-PcSaveFolder {
-    $candidates = @(
-        (Join-Path $env:USERPROFILE 'Documents\My Games\Terraria'),
-        (Join-Path $env:USERPROFILE 'OneDrive\Documents\My Games\Terraria'),
-        (Join-Path $env:USERPROFILE 'Мои документы\My Games\Terraria')
-    )
-    foreach ($candidate in $candidates) {
-        if ((Test-Path (Join-Path $candidate 'Players')) -or (Test-Path (Join-Path $candidate 'Worlds'))) {
-            return $candidate
-        }
-    }
-    foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) {
-            return $candidate
-        }
-    }
-    $candidates[0]
-}
-
-function Update-PcStats {
-    try {
-        $pcRoot = $script:PcPathBox.Text.Trim()
-        if (-not $pcRoot -or -not (Test-Path -LiteralPath $pcRoot -PathType Container)) {
-            $script:PcStatsLabel.Text = "⚠️ Папка не найдена"
-            $script:PcStatsLabel.ForeColor = [System.Drawing.Color]::FromArgb(248, 81, 73)
-            return
-        }
-
-        $playersDir = Join-Path $pcRoot 'Players'
-        $worldsDir = Join-Path $pcRoot 'Worlds'
-
-        $playerFiles = if (Test-Path $playersDir) {
-            @(Get-ChildItem -LiteralPath $playersDir -Filter "*.plr" -File -ErrorAction SilentlyContinue)
-        } else { @() }
-
-        $worldFiles = if (Test-Path $worldsDir) {
-            @(Get-ChildItem -LiteralPath $worldsDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(wld|twld)$' })
-        } else { @() }
-
-        $script:PcStatsLabel.Text = "👤 Персонажей: $($playerFiles.Count)   |   🗺️ Миров: $($worldFiles.Count)"
-        $script:PcStatsLabel.ForeColor = [System.Drawing.Color]::FromArgb(63, 185, 80)
-    }
-    catch {
-        $script:PcStatsLabel.Text = "Ошибка чтения папки"
-        $script:PcStatsLabel.ForeColor = [System.Drawing.Color]::FromArgb(139, 148, 158)
-    }
-}
-
 function Refresh-Devices {
     try {
         $result = Invoke-Adb -Arguments @('devices', '-l')
@@ -165,7 +65,6 @@ function Refresh-Devices {
         $script:DeviceItems = @()
         $script:DevicePicker.Items.Clear()
         $blocked = @()
-
         foreach ($line in ($result.Output -split "`r?`n")) {
             if ($line -match '^\s*(\S+)\s+(device|unauthorized|offline)(.*)$') {
                 $serial = $Matches[1]
@@ -186,29 +85,20 @@ function Refresh-Devices {
 
         if ($script:DevicePicker.Items.Count -gt 0) {
             $script:DevicePicker.SelectedIndex = 0
-            $activeDevice = $script:DeviceItems[0]
-            $script:DeviceStatusLabel.Text = "🟢 Подключен: $($activeDevice.Caption)"
-            $script:DeviceStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(63, 185, 80)
-            Set-Status "Телефон готов к работе: $($activeDevice.Caption)"
-            Add-Log "Найдено активных устройств: $($script:DeviceItems.Count)."
+            Set-Status "Телефон подключён: $($script:DeviceItems[0].Caption)"
+            Add-Log "Найдено устройств: $($script:DeviceItems.Count)."
         }
         elseif ($blocked.Count -gt 0) {
-            $script:DeviceStatusLabel.Text = "🟡 Требуется разрешение на экране телефона"
-            $script:DeviceStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(210, 153, 34)
-            Set-Status "Разрешите USB отладку на телефоне и нажмите «Обновить»."
-            Add-Log "Устройство ожидает авторизации: $($blocked -join ', ')."
+            Set-Status "Разрешите USB debugging на телефоне, затем обновите список."
+            Add-Log "Устройство найдено, но ещё не авторизовано: $($blocked -join ', ')."
         }
         else {
-            $script:DeviceStatusLabel.Text = "🔴 Телефон не обнаружен (проверьте USB кабель)"
-            $script:DeviceStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(248, 81, 73)
-            Set-Status 'Телефон не найден. Подключите USB, включите USB отладку и нажмите «Обновить».'
-            Add-Log 'ADB не обнаружил подключенных устройств.'
+            Set-Status 'Телефон не найден. Подключите USB, включите USB debugging и нажмите «Обновить». '
+            Add-Log 'ADB не видит подключённых устройств.'
         }
     }
     catch {
-        $script:DeviceStatusLabel.Text = "🔴 Ошибка вызова ADB"
-        $script:DeviceStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(248, 81, 73)
-        Set-Status 'Не удалось связаться с ADB.'
+        Set-Status 'Не удалось проверить подключение.'
         Add-Log "Ошибка ADB: $($_.Exception.Message)"
     }
 }
@@ -227,9 +117,7 @@ function Test-MobileFolder {
 function Find-MobileFolder {
     try {
         $device = Get-SelectedDevice
-        Set-Status 'Поиск папки сохранений Terraria на телефоне…'
-        Add-Log 'Автопоиск каталогов Terraria на телефоне…'
-
+        Set-Status 'Ищу папку сохранений Terraria на телефоне…'
         $packagesResult = Invoke-Adb -Arguments @('-s', $device.Serial, 'shell', 'pm', 'list', 'packages')
         $packages = @()
         if ($packagesResult.ExitCode -eq 0) {
@@ -246,25 +134,20 @@ function Find-MobileFolder {
                 if (Test-MobileFolder -Serial $device.Serial -Root $root) {
                     $script:MobilePathBox.Text = $root
                     Set-Status "Папка Terraria найдена: $root"
-                    Add-Log "Найдена папка на телефоне: $root"
+                    Add-Log "Автоматически найдена папка телефона: $root"
                     return
                 }
             }
         }
 
-        Set-Status 'Папка не найдена автоматически. Укажите путь вручную.'
-        Add-Log 'Автопоиск не нашел Players/Worlds. Введите Android-путь вручную.'
+        Set-Status 'Папка не найдена. Введите путь, который содержит Players и Worlds.'
+        Add-Log 'Автопоиск не нашёл каталог Players/Worlds. У пиратской сборки может быть другой package ID или приватное хранилище.'
         [System.Windows.Forms.MessageBox]::Show(
-            "Автопоиск не смог обнаружить папки Players и Worlds.`r`n`r`n" +
-            "Укажите путь к каталогу вручную. Например:`r`n/sdcard/Android/data/com.and.games505.TerrariaPaid`r`n`r`n" +
-            "Если ADB выдаёт Permission denied, доступ к Android/data блокируется системой Android (Android 11+).",
-            'Terraria Sync — Поиск папки',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        ) | Out-Null
+            "Автопоиск не нашёл папки Players и Worlds.`r`n`r`nУкажите путь к каталогу, в котором находятся эти папки. Например:`r`n/sdcard/Android/data/com.and.games505.TerrariaPaid`r`n`r`nЕсли ADB получает Permission denied, доступ к Android/data ограничивает Android или прошивка телефона. Если сохранения лежат во внутренней приватной папке приложения, обычно нужен встроенный экспорт игры либо root.",
+            'Terraria Sync', 'OK', 'Information') | Out-Null
     }
     catch {
-        Set-Status 'Не удалось выполнить поиск папки на телефоне.'
+        Set-Status 'Не удалось найти папку телефона.'
         Add-Log "Ошибка поиска: $($_.Exception.Message)"
     }
 }
@@ -277,11 +160,11 @@ function Get-SaveFiles {
     }
 
     if ($Kind -eq 'Players') {
-        $playerPattern = '(?i)^[^\\/]+\.plr(\.bak\d*)?$'
-        $mapPattern = '(?i)\.map(\.bak\d*)?$'
+        $playerPattern = '(?i)^[^\\/]+\.plr(\.bak)?$'
+        $mapPattern = '(?i)\.map(\.bak)?$'
     }
     else {
-        $pattern = '(?i)\.(wld|twld)(\.bak\d*)?$'
+        $pattern = '(?i)\.(wld|twld)(\.bak)?$'
     }
 
     $rootPrefix = $Folder.TrimEnd([char[]]@('\', '/')) + [System.IO.Path]::DirectorySeparatorChar
@@ -313,7 +196,7 @@ function Get-RemoteSaveNames {
     if ($exists.ExitCode -ne 0) { return @() }
     $result = Invoke-Adb -Arguments @('-s', $Serial, 'shell', 'find', $Folder, '-type', 'f')
     if ($result.ExitCode -ne 0) {
-        throw "Не удалось прочитать папку $Folder на телефоне. $($result.Output)"
+        throw "Не удалось прочитать телефонную папку $Folder. $($result.Output)"
     }
 
     $prefix = $Folder.TrimEnd('/') + '/'
@@ -324,12 +207,12 @@ function Get-RemoteSaveNames {
     } | Where-Object { $_ })
 
     if ($Kind -eq 'Players') {
-        $playerPattern = '(?i)^[^/]+\.plr(\.bak\d*)?$'
-        $mapPattern = '(?i)\.map(\.bak\d*)?$'
+        $playerPattern = '(?i)^[^/]+\.plr(\.bak)?$'
+        $mapPattern = '(?i)\.map(\.bak)?$'
         @($relativePaths | Where-Object { ($_ -match $playerPattern) -or ($_ -match $mapPattern) })
     }
     else {
-        $pattern = '(?i)\.(wld|twld)(\.bak\d*)?$'
+        $pattern = '(?i)\.(wld|twld)(\.bak)?$'
         @($relativePaths | Where-Object { $_ -match $pattern })
     }
 }
@@ -337,33 +220,16 @@ function Get-RemoteSaveNames {
 function New-BackupDirectory {
     param([string]$Direction)
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
-    $path = Join-Path $script:RootFolder "Backups\${stamp}_$Direction"
+    $path = Join-Path $PSScriptRoot "Backups\${stamp}_$Direction"
     New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null
     $path
 }
 
-# ==============================================================================
-# Transfer Logic (PC <-> Android)
-# ==============================================================================
 function Invoke-Transfer {
     param([ValidateSet('PhoneToPC', 'PCToPhone')][string]$Direction)
 
-    # Safety check: Is Terraria running on PC?
-    $runningTerraria = Get-Process -Name 'Terraria' -ErrorAction SilentlyContinue
-    if ($runningTerraria) {
-        $warnChoice = [System.Windows.Forms.MessageBox]::Show(
-            "Внимание! Обнаружен запущенный процесс Terraria на компьютере.`r`n`r`nЧтобы избежать повреждения или перезаписи сохранений игрой, рекомендуется закрыть Terraria перед синхронизацией.`r`n`r`nВы хотите всё равно продолжить?",
-            'Terraria Sync — Внимание',
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        if ($warnChoice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-    }
-
     $script:SyncFromPhoneButton.Enabled = $false
     $script:SyncToPhoneButton.Enabled = $false
-    $script:ProgressBar.Value = 0
-
     try {
         $device = Get-SelectedDevice
         $pcRoot = $script:PcPathBox.Text.Trim()
@@ -379,16 +245,13 @@ function Invoke-Transfer {
             throw 'Укажите полный путь Android, начинающийся с /.'
         }
         if (-not (Test-MobileFolder -Serial $device.Serial -Root $mobileRoot)) {
-            throw 'В указанной папке телефона не найдены Players или Worlds. Нажмите «Найти папку» и проверьте путь.'
+            throw 'В указанной папке телефона не найдены Players или Worlds. Нажмите «Найти папку» и проверьте путь. На этом телефоне сохранения могут лежать прямо в com.and.games505.TerrariaPaid, без /files.'
         }
 
         $directionText = if ($Direction -eq 'PCToPhone') { 'с компьютера на телефон' } else { 'с телефона на компьютер' }
         $choice = [System.Windows.Forms.MessageBox]::Show(
-            "Перед копированием полностью закройте Terraria на телефоне и на ПК.`r`n`r`nПродолжить копирование: $directionText?`r`n`r`nПрограмма автоматически создаст резервные копии всех файлов перед их переносом или заменой.",
-            'Подтвердите синхронизацию',
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Question
-        )
+            "Перед копированием полностью закройте Terraria на телефоне и на ПК.`r`n`r`nПродолжить: $directionText?`r`n`r`nСначала программа сохранит копии отправляемых файлов, а перед заменой — копии файлов на устройстве назначения.",
+            'Подтвердите синхронизацию', 'YesNo', 'Warning')
         if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
         $backupRoot = New-BackupDirectory -Direction $Direction
@@ -398,23 +261,17 @@ function Invoke-Transfer {
         $remoteNamesByKind = @{}
         $sourceBackupCount = 0
 
-        Set-Status 'Подготовка резервной копии исходных сохранений…'
-        Add-Log "=== Начало синхронизации: $directionText ==="
-        Add-Log "Каталог резервной копии: $backupRoot"
-
-        # Count total items for progress reporting
-        $totalFiles = 0
+        Set-Status 'Готовлю резервную копию исходных сохранений…'
         foreach ($kind in @('Players', 'Worlds')) {
             $localFolder = Join-Path $pcRoot $kind
             $remoteFolder = "$mobileRoot/$kind"
             if ($Direction -eq 'PCToPhone') {
                 $localFiles = if (Test-Path -LiteralPath $localFolder -PathType Container) {
                     @(Get-SaveFiles -Folder $localFolder -Kind $kind)
-                } else { @() }
+                }
+                else { @() }
                 $localFilesByKind[$kind] = $localFiles
                 $remoteNamesByKind[$kind] = @(Get-RemoteSaveNames -Serial $device.Serial -Folder $remoteFolder -Kind $kind)
-                $totalFiles += $localFiles.Count
-
                 foreach ($file in $localFiles) {
                     $sourceFolder = Join-Path $sourceBackupRoot $kind
                     $sourceBackupFile = Join-Path $sourceFolder $file.RelativePath
@@ -427,8 +284,6 @@ function Invoke-Transfer {
             else {
                 $remoteNames = @(Get-RemoteSaveNames -Serial $device.Serial -Folder $remoteFolder -Kind $kind)
                 $remoteNamesByKind[$kind] = $remoteNames
-                $totalFiles += $remoteNames.Count
-
                 foreach ($name in $remoteNames) {
                     $sourceFolder = Join-Path $sourceBackupRoot $kind
                     $sourceBackupFile = Join-Path $sourceFolder ($name -replace '/', '\')
@@ -446,8 +301,7 @@ function Invoke-Transfer {
         if (-not (Test-Path -LiteralPath $pcRoot -PathType Container)) {
             New-Item -ItemType Directory -Path $pcRoot -Force | Out-Null
         }
-        Add-Log "Создана резервная копия исходных файлов ($sourceBackupCount шт.)."
-
+        Add-Log "Создана исходная резервная копия файлов: $sourceBackupCount."
         $copied = 0
         foreach ($kind in @('Players', 'Worlds')) {
             $localFolder = Join-Path $pcRoot $kind
@@ -456,19 +310,17 @@ function Invoke-Transfer {
 
             if ($Direction -eq 'PCToPhone') {
                 $localFiles = @($localFilesByKind[$kind])
+                $remoteNames = @($remoteNamesByKind[$kind])
                 if ($localFiles.Count -eq 0) { continue }
 
-                $remoteNames = @($remoteNamesByKind[$kind])
                 $mkdir = Invoke-Adb -Arguments @('-s', $device.Serial, 'shell', 'mkdir', '-p', "$mobileRoot/Players", "$mobileRoot/Worlds")
                 if ($mkdir.ExitCode -ne 0) { throw "Не удалось создать папки на телефоне. $($mkdir.Output)" }
 
                 foreach ($file in $localFiles) {
                     $relativeRemotePath = $file.RelativePath.Replace('\', '/')
                     $remoteFilePath = "$remoteFolder/$relativeRemotePath"
-                    $copied++
-                    Set-Progress -Current $copied -Total $totalFiles -Message "Копирую на телефон: $($file.RelativePath)"
-                    Add-Log "-> Отправка на телефон: $($file.RelativePath)"
-
+                    Set-Status "Копирую на телефон: $($file.RelativePath)"
+                    [System.Windows.Forms.Application]::DoEvents()
                     if ($remoteNames -contains $relativeRemotePath) {
                         $backupFile = Join-Path $backupFolder $file.RelativePath
                         $backupParent = Split-Path -Parent $backupFile
@@ -481,6 +333,7 @@ function Invoke-Transfer {
                     if ($mkdir.ExitCode -ne 0) { throw "Не удалось подготовить папку для $($file.RelativePath). $($mkdir.Output)" }
                     $push = Invoke-Adb -Arguments @('-s', $device.Serial, 'push', $file.FullName, $remoteFilePath)
                     if ($push.ExitCode -ne 0) { throw "Не удалось отправить $($file.RelativePath). $($push.Output)" }
+                    $copied++
                 }
             }
             else {
@@ -497,43 +350,31 @@ function Invoke-Transfer {
                         New-Item -ItemType Directory -Path $destinationBackupParent -Force -ErrorAction Stop | Out-Null
                         Copy-Item -LiteralPath $localPath -Destination $destinationBackupFile -Force -ErrorAction Stop
                     }
-                    $copied++
-                    Set-Progress -Current $copied -Total $totalFiles -Message "Копирую на ПК: $name"
-                    Add-Log "<- Скачивание на ПК: $name"
-
+                    Set-Status "Копирую на ПК: $name"
+                    [System.Windows.Forms.Application]::DoEvents()
                     $pull = Invoke-Adb -Arguments @('-s', $device.Serial, 'pull', "$remoteFolder/$name", $localPath)
                     if ($pull.ExitCode -ne 0) { throw "Не удалось получить $name. $($pull.Output)" }
+                    $copied++
                 }
             }
         }
 
         if ($copied -eq 0) {
             Set-Status 'Подходящих сохранений не найдено.'
-            Add-Log 'Копирование не потребовалось: в выбранных папках нет сохранений персонажей или миров.'
+            Add-Log 'Копирование не потребовалось: в выбранных папках нет файлов персонажей или миров.'
         }
         else {
-            $script:ProgressBar.Value = 100
-            Set-Status "Готово! Успешно скопировано файлов: $copied."
-            Add-Log "Синхронизация завершена успешно ($directionText). Файлов: $copied."
-            Add-Log "Резервные копии сохранены в: $backupRoot"
-            Update-PcStats
+            Set-Status "Готово: скопировано файлов — $copied. Резервная копия: $backupRoot"
+            Add-Log "Готово ($directionText): файлов $copied. Резервные копии: $backupRoot"
             [System.Windows.Forms.MessageBox]::Show(
-                "Синхронизация успешно завершена!`r`n`r`nСкопировано файлов: $copied`r`n`r`nРезервные копии сохранены здесь:`r`n$backupRoot",
-                'Синхронизация завершена',
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Information
-            ) | Out-Null
+                "Скопировано файлов: $copied.`r`n`r`nРезервные копии находятся здесь:`r`n$backupRoot",
+                'Синхронизация завершена', 'OK', 'Information') | Out-Null
         }
     }
     catch {
-        Set-Status 'Синхронизация остановлена из-за ошибки.'
-        Add-Log "ОШИБКА: $($_.Exception.Message)"
-        [System.Windows.Forms.MessageBox]::Show(
-            $_.Exception.Message,
-            'Terraria Sync — Ошибка',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        ) | Out-Null
+        Set-Status 'Синхронизация остановлена.'
+        Add-Log "Ошибка: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Terraria Sync — ошибка', 'OK', 'Error') | Out-Null
     }
     finally {
         $script:SyncFromPhoneButton.Enabled = $true
@@ -541,434 +382,156 @@ function Invoke-Transfer {
     }
 }
 
-# ==============================================================================
-# UI Construction (Modern Dark Theme)
-# ==============================================================================
-
-# Palette Definition
-$cBgMain       = [System.Drawing.Color]::FromArgb(21, 24, 31)
-$cCardBg       = [System.Drawing.Color]::FromArgb(28, 33, 44)
-$cCardBorder   = [System.Drawing.Color]::FromArgb(44, 52, 68)
-$cInputBg      = [System.Drawing.Color]::FromArgb(15, 17, 24)
-$cInputText    = [System.Drawing.Color]::FromArgb(240, 246, 252)
-$cTextMuted    = [System.Drawing.Color]::FromArgb(139, 148, 158)
-$cTextPrimary  = [System.Drawing.Color]::FromArgb(240, 246, 252)
-$cAccentBlue   = [System.Drawing.Color]::FromArgb(88, 166, 255)
-$cBtnBlue      = [System.Drawing.Color]::FromArgb(31, 111, 235)
-$cBtnBlueHover = [System.Drawing.Color]::FromArgb(56, 139, 253)
-$cBtnGreen     = [System.Drawing.Color]::FromArgb(35, 134, 54)
-$cBtnGreenHover= [System.Drawing.Color]::FromArgb(46, 160, 67)
-$cBtnDark      = [System.Drawing.Color]::FromArgb(42, 49, 64)
-$cBtnDarkHover = [System.Drawing.Color]::FromArgb(56, 64, 82)
-
-# Helper: Create Styled Button
-function New-StyledButton {
-    param(
-        [string]$Text,
-        [System.Drawing.Point]$Location,
-        [System.Drawing.Size]$Size,
-        [System.Drawing.Color]$BackColor,
-        [System.Drawing.Color]$HoverColor,
-        [System.Drawing.Color]$ForeColor = [System.Drawing.Color]::White,
-        [System.Drawing.Font]$Font = $null,
-        [System.Windows.Forms.AnchorStyles]$Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
+function Find-PcSaveFolder {
+    $candidates = @(
+        (Join-Path $env:USERPROFILE 'Documents\My Games\Terraria'),
+        (Join-Path $env:USERPROFILE 'OneDrive\Documents\My Games\Terraria'),
+        (Join-Path $env:USERPROFILE 'Мои документы\My Games\Terraria')
     )
-    $btn = New-Object System.Windows.Forms.Button
-    $btn.Text = $Text
-    $btn.Location = $Location
-    $btn.Size = $Size
-    $btn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-    $btn.FlatAppearance.BorderSize = 0
-    $btn.BackColor = $BackColor
-    $btn.ForeColor = $ForeColor
-    $btn.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btn.Anchor = $Anchor
-    if ($Font) { $btn.Font = $Font }
-    else { $btn.Font = New-Object System.Drawing.Font('Segoe UI', 9) }
-
-    $btn.Tag = @{ Normal = $BackColor; Hover = $HoverColor }
-    $btn.Add_MouseEnter({
-        if ($this.Enabled) { $this.BackColor = $this.Tag.Hover }
-    })
-    $btn.Add_MouseLeave({
-        $this.BackColor = $this.Tag.Normal
-    })
-    $btn.Add_EnabledChanged({
-        if ($this.Enabled) {
-            $this.BackColor = $this.Tag.Normal
-        } else {
-            $this.BackColor = [System.Drawing.Color]::FromArgb(40, 44, 56)
+    foreach ($candidate in $candidates) {
+        if ((Test-Path (Join-Path $candidate 'Players')) -or (Test-Path (Join-Path $candidate 'Worlds'))) {
+            return $candidate
         }
-    })
-    return $btn
+    }
+    $candidates[0]
 }
 
-# Helper: Create Styled Card Panel
-function New-CardPanel {
-    param(
-        [System.Drawing.Point]$Location,
-        [System.Drawing.Size]$Size,
-        [System.Windows.Forms.AnchorStyles]$Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
-    )
-    $p = New-Object System.Windows.Forms.Panel
-    $p.Location = $Location
-    $p.Size = $Size
-    $p.BackColor = $cCardBg
-    $p.Anchor = $Anchor
-    $p.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-    $p.Add_Paint({
-        param($sender, $e)
-        $rect = [System.Drawing.Rectangle]::new(0, 0, $sender.Width - 1, $sender.Height - 1)
-        $pen = [System.Drawing.Pen]::new($cCardBorder, 1)
-        $e.Graphics.DrawRectangle($pen, $rect)
-        $pen.Dispose()
-    })
-    return $p
-}
-
-# --- Main Form ---
 $script:MainForm = New-Object System.Windows.Forms.Form
-$script:MainForm.Text = 'Terraria Sync — ПК & Android USB'
+$script:MainForm.Text = 'Terraria Sync'
 $script:MainForm.StartPosition = 'CenterScreen'
-$script:MainForm.Size = New-Object System.Drawing.Size(900, 800)
-$script:MainForm.MinimumSize = New-Object System.Drawing.Size(840, 740)
-$script:MainForm.BackColor = $cBgMain
-$script:MainForm.ForeColor = $cTextPrimary
+$script:MainForm.Size = New-Object System.Drawing.Size(850, 680)
+$script:MainForm.MinimumSize = New-Object System.Drawing.Size(780, 650)
 $script:MainForm.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 
-# Enable DoubleBuffering to eliminate flicker
-$script:MainForm.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic').SetValue($script:MainForm, $true, $null)
+$header = New-Object System.Windows.Forms.Label
+$header.Text = 'Terraria Sync'
+$header.Location = New-Object System.Drawing.Point(20, 16)
+$header.Size = New-Object System.Drawing.Size(300, 32)
+$header.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 18)
+$script:MainForm.Controls.Add($header)
 
-# --- Top Header ---
-$headerTitle = New-Object System.Windows.Forms.Label
-$headerTitle.Text = '🌲 Terraria Sync'
-$headerTitle.Location = New-Object System.Drawing.Point(20, 14)
-$headerTitle.Size = New-Object System.Drawing.Size(320, 32)
-$headerTitle.Font = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
-$headerTitle.ForeColor = $cTextPrimary
-$script:MainForm.Controls.Add($headerTitle)
+$intro = New-Object System.Windows.Forms.Label
+$intro.Text = 'Перенос персонажей и миров между Terraria на ПК и Android через USB.'
+$intro.Location = New-Object System.Drawing.Point(22, 52)
+$intro.Size = New-Object System.Drawing.Size(760, 22)
+$script:MainForm.Controls.Add($intro)
 
-$headerSubtitle = New-Object System.Windows.Forms.Label
-$headerSubtitle.Text = 'Синхронизация сохранений (персонажи и миры) между ПК и телефоном через USB ADB'
-$headerSubtitle.Location = New-Object System.Drawing.Point(22, 46)
-$headerSubtitle.Size = New-Object System.Drawing.Size(540, 20)
-$headerSubtitle.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-$headerSubtitle.ForeColor = $cTextMuted
-$script:MainForm.Controls.Add($headerSubtitle)
-
-# Header Action Buttons (Right Aligned)
-$btnHelp = New-StyledButton -Text '❓ Справка' `
-    -Location (New-Object System.Drawing.Point(770, 20)) `
-    -Size (New-Object System.Drawing.Size(90, 32)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
-$btnHelp.Add_Click({
-    [System.Windows.Forms.MessageBox]::Show(
-        "Инструкция по настройке и использованию:`r`n`r`n" +
-        "1. На телефоне: «Настройки» → «Для разработчиков» → включите «Отладка по USB».`r`n" +
-        "2. Подключите телефон кабелем к ПК, разблокируйте экран и выберите «Всегда разрешать с этого компьютера».`r`n" +
-        "3. В блоке телефона нажмите «Обновить», затем «Найти папку».`r`n" +
-        "4. Обязательно закройте Terraria на телефоне и ПК перед переносом!`r`n" +
-        "5. Выберите нужное направление переноса. Перед любым изменением автоматически создаётся резервная копия.`r`n`r`n" +
-        "Пути по умолчанию:`r`n" +
-        "• ПК: Документы\My Games\Terraria`r`n" +
-        "• Телефон: /sdcard/Android/data/com.and.games505.TerrariaPaid",
-        'Terraria Sync — Справка',
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Information
-    ) | Out-Null
-})
-$script:MainForm.Controls.Add($btnHelp)
-
-$btnOpenPc = New-StyledButton -Text '📂 Папка ПК' `
-    -Location (New-Object System.Drawing.Point(670, 20)) `
-    -Size (New-Object System.Drawing.Size(94, 32)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
-$btnOpenPc.Add_Click({
-    $p = $script:PcPathBox.Text.Trim()
-    if ($p -and (Test-Path -LiteralPath $p)) {
-        Invoke-Item -LiteralPath $p
-    } else {
-        [System.Windows.Forms.MessageBox]::Show('Папка на компьютере ещё не существует.', 'Terraria Sync', 'OK', 'Warning') | Out-Null
-    }
-})
-$script:MainForm.Controls.Add($btnOpenPc)
-
-$btnOpenBackups = New-StyledButton -Text '📁 Бэкапы' `
-    -Location (New-Object System.Drawing.Point(576, 20)) `
-    -Size (New-Object System.Drawing.Size(88, 32)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
-$btnOpenBackups.Add_Click({
-    $backupDir = Join-Path $script:RootFolder 'Backups'
-    if (-not (Test-Path -LiteralPath $backupDir)) {
-        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-    }
-    Invoke-Item -LiteralPath $backupDir
-})
-$script:MainForm.Controls.Add($btnOpenBackups)
-
-# ==============================================================================
-# CARD 1: PC Settings
-# ==============================================================================
-$cardPc = New-CardPanel -Location (New-Object System.Drawing.Point(20, 74)) -Size (New-Object System.Drawing.Size(844, 96))
-$script:MainForm.Controls.Add($cardPc)
-
-$pcTitle = New-Object System.Windows.Forms.Label
-$pcTitle.Text = '💻 Папка Terraria на компьютере'
-$pcTitle.Location = New-Object System.Drawing.Point(16, 10)
-$pcTitle.Size = New-Object System.Drawing.Size(350, 20)
-$pcTitle.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-$pcTitle.ForeColor = $cAccentBlue
-$cardPc.Controls.Add($pcTitle)
-
-$script:PcStatsLabel = New-Object System.Windows.Forms.Label
-$script:PcStatsLabel.Text = 'Поиск сохранений…'
-$script:PcStatsLabel.Location = New-Object System.Drawing.Point(400, 10)
-$script:PcStatsLabel.Size = New-Object System.Drawing.Size(428, 20)
-$script:PcStatsLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-$script:PcStatsLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-$script:PcStatsLabel.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
-$cardPc.Controls.Add($script:PcStatsLabel)
+$pcLabel = New-Object System.Windows.Forms.Label
+$pcLabel.Text = 'Папка Terraria на компьютере (внутри Players и Worlds):'
+$pcLabel.Location = New-Object System.Drawing.Point(22, 88)
+$pcLabel.Size = New-Object System.Drawing.Size(600, 20)
+$script:MainForm.Controls.Add($pcLabel)
 
 $script:PcPathBox = New-Object System.Windows.Forms.TextBox
-$script:PcPathBox.Location = New-Object System.Drawing.Point(16, 36)
-$script:PcPathBox.Size = New-Object System.Drawing.Size(610, 26)
-$script:PcPathBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
-$script:PcPathBox.BackColor = $cInputBg
-$script:PcPathBox.ForeColor = $cInputText
-$script:PcPathBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+$script:PcPathBox.Location = New-Object System.Drawing.Point(22, 111)
+$script:PcPathBox.Size = New-Object System.Drawing.Size(650, 26)
+$script:PcPathBox.Anchor = 'Top,Left,Right'
 $script:PcPathBox.Text = Find-PcSaveFolder
-$script:PcPathBox.Add_TextChanged({ Update-PcStats })
-$cardPc.Controls.Add($script:PcPathBox)
+$script:MainForm.Controls.Add($script:PcPathBox)
 
-$browsePc = New-StyledButton -Text 'Обзор…' `
-    -Location (New-Object System.Drawing.Point(636, 35)) `
-    -Size (New-Object System.Drawing.Size(94, 28)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
+$browsePc = New-Object System.Windows.Forms.Button
+$browsePc.Text = 'Выбрать…'
+$browsePc.Location = New-Object System.Drawing.Point(682, 109)
+$browsePc.Size = New-Object System.Drawing.Size(130, 30)
+$browsePc.Anchor = 'Top,Right'
 $browsePc.Add_Click({
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = 'Выберите папку Terraria на ПК, в которой лежат Players и Worlds'
+    $dialog.Description = 'Выберите папку Terraria, где находятся Players и Worlds'
     $dialog.SelectedPath = $script:PcPathBox.Text
-    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $script:PcPathBox.Text = $dialog.SelectedPath
-        Update-PcStats
-    }
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $script:PcPathBox.Text = $dialog.SelectedPath }
 })
-$cardPc.Controls.Add($browsePc)
+$script:MainForm.Controls.Add($browsePc)
 
-$detectPc = New-StyledButton -Text 'Автопоиск' `
-    -Location (New-Object System.Drawing.Point(736, 35)) `
-    -Size (New-Object System.Drawing.Size(92, 28)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
-$detectPc.Add_Click({
-    $script:PcPathBox.Text = Find-PcSaveFolder
-    Update-PcStats
-})
-$cardPc.Controls.Add($detectPc)
+$deviceLabel = New-Object System.Windows.Forms.Label
+$deviceLabel.Text = 'Телефон (USB debugging должен быть включён):'
+$deviceLabel.Location = New-Object System.Drawing.Point(22, 156)
+$deviceLabel.Size = New-Object System.Drawing.Size(480, 20)
+$script:MainForm.Controls.Add($deviceLabel)
 
-$pcHint = New-Object System.Windows.Forms.Label
-$pcHint.Text = 'Каталог должен содержать подпапки Players (файлы .plr) и Worlds (файлы .wld).'
-$pcHint.Location = New-Object System.Drawing.Point(16, 68)
-$pcHint.Size = New-Object System.Drawing.Size(650, 18)
-$pcHint.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
-$pcHint.ForeColor = $cTextMuted
-$cardPc.Controls.Add($pcHint)
-
-# ==============================================================================
-# CARD 2: Android USB Settings
-# ==============================================================================
-$cardMobile = New-CardPanel -Location (New-Object System.Drawing.Point(20, 178)) -Size (New-Object System.Drawing.Size(844, 134))
-$script:MainForm.Controls.Add($cardMobile)
-
-$mobileTitle = New-Object System.Windows.Forms.Label
-$mobileTitle.Text = '📱 Телефон Android (USB Отладка)'
-$mobileTitle.Location = New-Object System.Drawing.Point(16, 10)
-$mobileTitle.Size = New-Object System.Drawing.Size(320, 20)
-$mobileTitle.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-$mobileTitle.ForeColor = $cAccentBlue
-$cardMobile.Controls.Add($mobileTitle)
-
-$script:DeviceStatusLabel = New-Object System.Windows.Forms.Label
-$script:DeviceStatusLabel.Text = 'Проверка устройств…'
-$script:DeviceStatusLabel.Location = New-Object System.Drawing.Point(350, 10)
-$script:DeviceStatusLabel.Size = New-Object System.Drawing.Size(478, 20)
-$script:DeviceStatusLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-$script:DeviceStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-$script:DeviceStatusLabel.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
-$cardMobile.Controls.Add($script:DeviceStatusLabel)
-
-# Device Picker Row
 $script:DevicePicker = New-Object System.Windows.Forms.ComboBox
 $script:DevicePicker.DropDownStyle = 'DropDownList'
-$script:DevicePicker.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-$script:DevicePicker.Location = New-Object System.Drawing.Point(16, 34)
-$script:DevicePicker.Size = New-Object System.Drawing.Size(710, 26)
-$script:DevicePicker.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
-$script:DevicePicker.BackColor = $cInputBg
-$script:DevicePicker.ForeColor = $cInputText
-$cardMobile.Controls.Add($script:DevicePicker)
+$script:DevicePicker.Location = New-Object System.Drawing.Point(22, 179)
+$script:DevicePicker.Size = New-Object System.Drawing.Size(545, 27)
+$script:DevicePicker.Anchor = 'Top,Left,Right'
+$script:MainForm.Controls.Add($script:DevicePicker)
 
-$refreshButton = New-StyledButton -Text '🔄 Обновить' `
-    -Location (New-Object System.Drawing.Point(734, 33)) `
-    -Size (New-Object System.Drawing.Size(94, 28)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
+$refreshButton = New-Object System.Windows.Forms.Button
+$refreshButton.Text = 'Обновить'
+$refreshButton.Location = New-Object System.Drawing.Point(577, 177)
+$refreshButton.Size = New-Object System.Drawing.Size(105, 30)
+$refreshButton.Anchor = 'Top,Right'
 $refreshButton.Add_Click({ Refresh-Devices })
-$cardMobile.Controls.Add($refreshButton)
+$script:MainForm.Controls.Add($refreshButton)
 
-# Android Path Row
-$script:MobilePathBox = New-Object System.Windows.Forms.TextBox
-$script:MobilePathBox.Location = New-Object System.Drawing.Point(16, 68)
-$script:MobilePathBox.Size = New-Object System.Drawing.Size(710, 26)
-$script:MobilePathBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
-$script:MobilePathBox.BackColor = $cInputBg
-$script:MobilePathBox.ForeColor = $cInputText
-$script:MobilePathBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-$script:MobilePathBox.Text = '/sdcard/Android/data/com.and.games505.TerrariaPaid'
-$cardMobile.Controls.Add($script:MobilePathBox)
-
-$detectButton = New-StyledButton -Text '🔍 Найти папку' `
-    -Location (New-Object System.Drawing.Point(734, 67)) `
-    -Size (New-Object System.Drawing.Size(94, 28)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
+$detectButton = New-Object System.Windows.Forms.Button
+$detectButton.Text = 'Найти папку'
+$detectButton.Location = New-Object System.Drawing.Point(692, 177)
+$detectButton.Size = New-Object System.Drawing.Size(120, 30)
+$detectButton.Anchor = 'Top,Right'
 $detectButton.Add_Click({ Find-MobileFolder })
-$cardMobile.Controls.Add($detectButton)
+$script:MainForm.Controls.Add($detectButton)
 
-$mobileHint = New-Object System.Windows.Forms.Label
-$mobileHint.Text = 'ADB обращается напрямую к файлам игры без root-прав. На телефоне должен быть включён режим отладки по USB.'
-$mobileHint.Location = New-Object System.Drawing.Point(16, 102)
-$mobileHint.Size = New-Object System.Drawing.Size(750, 18)
-$mobileHint.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
-$mobileHint.ForeColor = $cTextMuted
-$cardMobile.Controls.Add($mobileHint)
+$mobileLabel = New-Object System.Windows.Forms.Label
+$mobileLabel.Text = 'Папка сохранений на телефоне (каталог с Players и Worlds):'
+$mobileLabel.Location = New-Object System.Drawing.Point(22, 222)
+$mobileLabel.Size = New-Object System.Drawing.Size(670, 20)
+$script:MainForm.Controls.Add($mobileLabel)
 
-# ==============================================================================
-# CARD 3: Actions & Progress
-# ==============================================================================
-$cardActions = New-CardPanel -Location (New-Object System.Drawing.Point(20, 320)) -Size (New-Object System.Drawing.Size(844, 134))
-$script:MainForm.Controls.Add($cardActions)
+$script:MobilePathBox = New-Object System.Windows.Forms.TextBox
+$script:MobilePathBox.Location = New-Object System.Drawing.Point(22, 245)
+$script:MobilePathBox.Size = New-Object System.Drawing.Size(790, 26)
+$script:MobilePathBox.Anchor = 'Top,Left,Right'
+$script:MobilePathBox.Text = '/sdcard/Android/data/com.and.games505.TerrariaPaid'
+$script:MainForm.Controls.Add($script:MobilePathBox)
 
-$actionsTitle = New-Object System.Windows.Forms.Label
-$actionsTitle.Text = '🚀 Синхронизация сохранений'
-$actionsTitle.Location = New-Object System.Drawing.Point(16, 8)
-$actionsTitle.Size = New-Object System.Drawing.Size(300, 20)
-$actionsTitle.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-$actionsTitle.ForeColor = $cTextPrimary
-$cardActions.Controls.Add($actionsTitle)
+$help = New-Object System.Windows.Forms.Label
+$help.Text = 'ADB копирует прямо в папку Terraria, даже если файловый менеджер её не открывает. Перед копированием закройте игру на обоих устройствах. Резервные копии создаются автоматически.'
+$help.Location = New-Object System.Drawing.Point(22, 279)
+$help.Size = New-Object System.Drawing.Size(790, 40)
+$help.Anchor = 'Top,Left,Right'
+$script:MainForm.Controls.Add($help)
 
-# Split width dynamically for 2 main action buttons
-$btnWidth = [int](($cardActions.Width - 44) / 2)
-
-$script:SyncToPhoneButton = New-StyledButton -Text '⬆️  Отправить на телефон   (ПК ➔ Android)' `
-    -Location (New-Object System.Drawing.Point(16, 32)) `
-    -Size (New-Object System.Drawing.Size($btnWidth, 44)) `
-    -BackColor $cBtnGreen -HoverColor $cBtnGreenHover `
-    -Font (New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold))
+$script:SyncToPhoneButton = New-Object System.Windows.Forms.Button
+$script:SyncToPhoneButton.Text = 'Отправить на телефон  (ПК → Android)'
+$script:SyncToPhoneButton.Location = New-Object System.Drawing.Point(22, 326)
+$script:SyncToPhoneButton.Size = New-Object System.Drawing.Size(380, 42)
+$script:SyncToPhoneButton.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
 $script:SyncToPhoneButton.Add_Click({ Invoke-Transfer -Direction 'PCToPhone' })
-$cardActions.Controls.Add($script:SyncToPhoneButton)
+$script:MainForm.Controls.Add($script:SyncToPhoneButton)
 
-$script:SyncFromPhoneButton = New-StyledButton -Text '⬇️  Скачать на компьютер   (Android ➔ ПК)' `
-    -Location (New-Object System.Drawing.Point(($btnWidth + 28), 32)) `
-    -Size (New-Object System.Drawing.Size($btnWidth, 44)) `
-    -BackColor $cBtnBlue -HoverColor $cBtnBlueHover `
-    -Font (New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold))
+$script:SyncFromPhoneButton = New-Object System.Windows.Forms.Button
+$script:SyncFromPhoneButton.Text = 'Скачать на компьютер  (Android → ПК)'
+$script:SyncFromPhoneButton.Location = New-Object System.Drawing.Point(422, 326)
+$script:SyncFromPhoneButton.Size = New-Object System.Drawing.Size(390, 42)
+$script:SyncFromPhoneButton.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
 $script:SyncFromPhoneButton.Add_Click({ Invoke-Transfer -Direction 'PhoneToPC' })
-$cardActions.Controls.Add($script:SyncFromPhoneButton)
+$script:MainForm.Controls.Add($script:SyncFromPhoneButton)
 
-# Keep action buttons equally sized on resize
-$cardActions.Add_Resize({
-    $w = [int](($this.Width - 44) / 2)
-    $script:SyncToPhoneButton.Width = $w
-    $script:SyncFromPhoneButton.Left = $w + 28
-    $script:SyncFromPhoneButton.Width = $w
-})
-
-# Progress Bar
-$script:ProgressBar = New-Object System.Windows.Forms.ProgressBar
-$script:ProgressBar.Location = New-Object System.Drawing.Point(16, 84)
-$script:ProgressBar.Size = New-Object System.Drawing.Size(812, 10)
-$script:ProgressBar.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
-$script:ProgressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-$cardActions.Controls.Add($script:ProgressBar)
-
-# Status Label
 $script:StatusLabel = New-Object System.Windows.Forms.Label
-$script:StatusLabel.Text = 'Готов к работе. Подключите телефон и выберите направление переноса.'
-$script:StatusLabel.Location = New-Object System.Drawing.Point(16, 102)
-$script:StatusLabel.Size = New-Object System.Drawing.Size(812, 22)
-$script:StatusLabel.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
-$script:StatusLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-$script:StatusLabel.ForeColor = $cTextPrimary
-$cardActions.Controls.Add($script:StatusLabel)
-
-# ==============================================================================
-# CARD 4: Log Window
-# ==============================================================================
-$cardLog = New-CardPanel -Location (New-Object System.Drawing.Point(20, 462)) `
-    -Size (New-Object System.Drawing.Size(844, ($script:MainForm.ClientSize.Height - 462 - 16))) `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
-$script:MainForm.Controls.Add($cardLog)
-
-$logTitle = New-Object System.Windows.Forms.Label
-$logTitle.Text = '📜 Журнал работы'
-$logTitle.Location = New-Object System.Drawing.Point(16, 10)
-$logTitle.Size = New-Object System.Drawing.Size(200, 20)
-$logTitle.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-$logTitle.ForeColor = $cTextPrimary
-$cardLog.Controls.Add($logTitle)
-
-$btnCopyLog = New-StyledButton -Text '📋 Копировать лог' `
-    -Location (New-Object System.Drawing.Point(686, 6)) `
-    -Size (New-Object System.Drawing.Size(142, 24)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
-$btnCopyLog.Add_Click({
-    if ($script:LogBox.Text) {
-        [System.Windows.Forms.Clipboard]::SetText($script:LogBox.Text)
-        Add-Log 'Журнал работы скопирован в буфер обмена.'
-    }
-})
-$cardLog.Controls.Add($btnCopyLog)
-
-$btnClearLog = New-StyledButton -Text '🧹 Очистить' `
-    -Location (New-Object System.Drawing.Point(588, 6)) `
-    -Size (New-Object System.Drawing.Size(92, 24)) `
-    -BackColor $cBtnDark -HoverColor $cBtnDarkHover `
-    -Anchor ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
-$btnClearLog.Add_Click({
-    $script:LogBox.Clear()
-})
-$cardLog.Controls.Add($btnClearLog)
+$script:StatusLabel.Text = 'Подключите телефон, разблокируйте его и подтвердите запрос USB debugging.'
+$script:StatusLabel.Location = New-Object System.Drawing.Point(22, 380)
+$script:StatusLabel.Size = New-Object System.Drawing.Size(790, 24)
+$script:StatusLabel.Anchor = 'Top,Left,Right'
+$script:StatusLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+$script:MainForm.Controls.Add($script:StatusLabel)
 
 $script:LogBox = New-Object System.Windows.Forms.TextBox
-$script:LogBox.Location = New-Object System.Drawing.Point(14, 34)
-$script:LogBox.Size = New-Object System.Drawing.Size(814, ($cardLog.Height - 44))
-$script:LogBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
+$script:LogBox.Location = New-Object System.Drawing.Point(22, 409)
+$script:LogBox.Size = New-Object System.Drawing.Size(790, 185)
+$script:LogBox.Anchor = 'Top,Bottom,Left,Right'
 $script:LogBox.Multiline = $true
 $script:LogBox.ReadOnly = $true
 $script:LogBox.ScrollBars = 'Vertical'
-$script:LogBox.BackColor = $cInputBg
-$script:LogBox.ForeColor = [System.Drawing.Color]::FromArgb(201, 209, 217)
-$script:LogBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
 $script:LogBox.Font = New-Object System.Drawing.Font('Consolas', 9)
-$cardLog.Controls.Add($script:LogBox)
+$script:MainForm.Controls.Add($script:LogBox)
 
-# ==============================================================================
-# Initialization
-# ==============================================================================
-$script:MainForm.Add_Shown({
-    Update-PcStats
-    if ($script:AdbPath) {
-        Add-Log "Используется ADB: $script:AdbPath"
-    } else {
-        Add-Log "ВНИМАНИЕ: adb.exe не найден автоматически! Укажите путь к platform-tools."
-    }
-    Refresh-Devices
-})
+$footer = New-Object System.Windows.Forms.Label
+$footer.Text = 'Примечание: версии Terraria на телефоне и ПК должны быть совместимы. Синхронизация копирует файлы сохранений, но не конвертирует их.'
+$footer.Location = New-Object System.Drawing.Point(22, 610)
+$footer.Size = New-Object System.Drawing.Size(790, 24)
+$footer.Anchor = 'Bottom,Left,Right'
+$footer.ForeColor = [System.Drawing.Color]::DimGray
+$script:MainForm.Controls.Add($footer)
 
+$script:MainForm.Add_Shown({ Refresh-Devices })
 [void]$script:MainForm.ShowDialog()
