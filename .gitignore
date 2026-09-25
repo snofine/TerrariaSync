@@ -1,0 +1,24 @@
+# Terraria Sync - Git Ignore
+
+# User saves and backups
+Backups/
+*.plr
+*.plr.bak
+*.wld
+*.wld.bak
+*.twld
+*.twld.bak
+*.map
+*.map.bak
+
+# Android SDK platform-tools if present locally
+.android-sdk/
+
+# OS and Editor metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.tmp
+.vscode/
+.idea/
